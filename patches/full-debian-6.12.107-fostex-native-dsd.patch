@@ -1,0 +1,354 @@
+--- a/sound/usb/clock.c
++++ b/sound/usb/clock.c
+@@ -1,4 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Fostex HP-A4BL native DSD modifications: 2026-10-02.
++ * Local driver changes; see docs/PROVENANCE.md.
++ * This publication adds this notice only; executable logic is unchanged.
++ */
+ /*
+  *   Clock domain and sample rate management functions
+  */
+@@ -590,6 +595,64 @@
+ 	return get_sample_rate_v2v3(chip, fmt->iface, fmt->altsetting, clock);
+ }
+ 
++/* Strict post-mode transaction, used only by the opt-in Fostex quirk.
++ * Do not weaken length/validity failures into the generic clock fallbacks.
++ */
++int snd_usb_fostex_set_rate(struct snd_usb_audio *chip,
++			    const struct audioformat *fmt, int clock, int rate)
++{
++	union uac23_clock_source_desc *cs_desc;
++	struct usb_host_interface *ctrl_intf;
++	__le32 data;
++	unsigned char valid = 0;
++	int err, index;
++
++	if (fmt->protocol != UAC_VERSION_2 || rate <= 0)
++		return -EINVAL;
++	ctrl_intf = snd_usb_find_ctrl_interface(chip, fmt->iface);
++	if (!ctrl_intf)
++		return -EINVAL;
++	cs_desc = snd_usb_find_clock_source(chip, clock, fmt);
++	if (!cs_desc)
++		return -EINVAL;
++	if (!uac_v2v3_control_is_writeable(cs_desc->v2.bmControls,
++					 UAC2_CS_CONTROL_SAM_FREQ) ||
++	    !uac_v2v3_control_is_readable(cs_desc->v2.bmControls,
++					UAC2_CS_CONTROL_CLOCK_VALID))
++		return -EINVAL;
++	index = snd_usb_ctrl_intf(ctrl_intf) | (clock << 8);
++	data = cpu_to_le32(rate);
++	err = snd_usb_ctl_msg(chip->dev, usb_sndctrlpipe(chip->dev, 0),
++			      UAC2_CS_CUR,
++			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
++			      UAC2_CS_CONTROL_SAM_FREQ << 8, index,
++			      &data, sizeof(data));
++	if (err != (int)sizeof(data))
++		return err < 0 ? err : -EIO;
++
++	data = 0;
++	err = snd_usb_ctl_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
++			      UAC2_CS_CUR,
++			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
++			      UAC2_CS_CONTROL_SAM_FREQ << 8, index,
++			      &data, sizeof(data));
++	if (err != (int)sizeof(data))
++		return err < 0 ? err : -EIO;
++	if (le32_to_cpu(data) != (unsigned int)rate)
++		return -EIO;
++
++	err = snd_usb_ctl_msg(chip->dev, usb_rcvctrlpipe(chip->dev, 0),
++			      UAC2_CS_CUR,
++			      USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_IN,
++			      UAC2_CS_CONTROL_CLOCK_VALID << 8, index,
++			      &valid, sizeof(valid));
++	if (err != (int)sizeof(valid))
++		return err < 0 ? err : -EIO;
++	if (!valid)
++		return -ENXIO;
++	return rate;
++}
++
+ static int set_sample_rate_v2v3(struct snd_usb_audio *chip,
+ 				const struct audioformat *fmt, int rate)
+ {
+--- a/sound/usb/clock.h
++++ b/sound/usb/clock.h
+@@ -1,3 +1,8 @@
++/*
++ * Fostex HP-A4BL native DSD modifications: 2026-10-02.
++ * Local driver changes; see docs/PROVENANCE.md.
++ * This publication adds this notice only; executable logic is unchanged.
++ */
+ /* SPDX-License-Identifier: GPL-2.0 */
+ #ifndef __USBAUDIO_CLOCK_H
+ #define __USBAUDIO_CLOCK_H
+@@ -12,4 +17,7 @@
+ 				 const struct audioformat *fmt,
+ 				 int clock, int rate);
+ 
++int snd_usb_fostex_set_rate(struct snd_usb_audio *chip,
++			    const struct audioformat *fmt, int clock, int rate);
++
+ #endif /* __USBAUDIO_CLOCK_H */
+--- a/sound/usb/endpoint.c
++++ b/sound/usb/endpoint.c
+@@ -1,4 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Fostex HP-A4BL native DSD modifications: 2026-10-02.
++ * Local driver changes; see docs/PROVENANCE.md.
++ * This publication adds this notice only; executable logic is unchanged.
++ */
+ /*
+  */
+ 
+@@ -1485,6 +1490,7 @@
+ 			     struct snd_usb_endpoint *ep)
+ {
+ 	bool iface_first;
++	bool mode_first = snd_usb_fostex_dsd_enabled(chip);
+ 	int err = 0;
+ 
+ 	mutex_lock(&chip->mutex);
+@@ -1526,13 +1532,27 @@
+ 	if (err < 0)
+ 		goto unlock;
+ 
+-	err = init_sample_rate(chip, ep);
++	/* Only this opt-in device requires mode selection before any rate write. */
++	if (!mode_first) {
++		err = init_sample_rate(chip, ep);
++		if (err < 0)
++			goto unlock;
++	}
++
++	err = snd_usb_select_mode_quirk(chip, ep->cur_audiofmt,
++					ep->cur_format, ep->cur_rate);
+ 	if (err < 0)
+ 		goto unlock;
+-
+-	err = snd_usb_select_mode_quirk(chip, ep->cur_audiofmt);
+-	if (err < 0)
+-		goto unlock;
++	if (err > 0 && ep->clock_ref) {
++		ep->clock_ref->rate = ep->cur_rate;
++		ep->clock_ref->need_setup = false;
++	}
++
++	if (mode_first) {
++		err = init_sample_rate(chip, ep);
++		if (err < 0)
++			goto unlock;
++	}
+ 
+ 	/* for UAC2/3, enable the interface altset here at last */
+ 	if (!iface_first) {
+--- a/sound/usb/quirks.c
++++ b/sound/usb/quirks.c
+@@ -1,8 +1,14 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ /*
++ * Fostex HP-A4BL native DSD modifications: 2026-10-02.
++ * Local driver changes; see docs/PROVENANCE.md.
++ * This publication adds this notice only; executable logic is unchanged.
+  */
++/*
++ */
+ 
+ #include <linux/init.h>
++#include <linux/moduleparam.h>
+ #include <linux/slab.h>
+ #include <linux/usb.h>
+ #include <linux/usb/audio.h>
+@@ -26,6 +32,48 @@
+ #include "pcm.h"
+ #include "clock.h"
+ #include "stream.h"
++
++/* Experimental: no Fostex behavior is changed unless explicitly enabled. */
++static bool fostex_dsd;
++module_param_named(fostex_dsd, fostex_dsd, bool, 0444);
++MODULE_PARM_DESC(fostex_dsd,
++		"Experimental native DSD for Fostex HP-A4BL 1019:0013 (untested hardware)");
++
++static bool is_fostex_dsd(const struct snd_usb_audio *chip)
++{
++	return fostex_dsd && chip->usb_id == USB_ID(0x1019, 0x0013);
++}
++
++/*
++ * HP-A4BL advertises native-DSD transport rates in the shared clock range.
++ * Probe has not selected a mode, so rate_max (352800) is not a safe PCM
++ * initialization rate. Defer hardware setup to endpoint_prepare(), which
++ * selects the actual PCM/DSD mode before applying the requested clock.
++ */
++bool snd_usb_fostex_dsd_enabled(struct snd_usb_audio *chip)
++{
++	return is_fostex_dsd(chip);
++}
++
++/*
++ * Windows 2.2.1 transports four consecutive MSB-first DSD bytes per channel.
++ * Require an explicit opt-in and conservative descriptor shape. The exact
++ * hardware alternate layout remains to be verified before enabling this.
++ */
++static u64 fostex_dsd_format_quirk(struct snd_usb_audio *chip,
++				 struct audioformat *fp,
++				 unsigned int sample_bytes)
++{
++	struct usb_interface *iface = usb_ifnum_to_if(chip->dev, fp->iface);
++
++	if (iface && fp->protocol == UAC_VERSION_2 &&
++	    !(fp->endpoint & USB_DIR_IN) && fp->channels == 2 &&
++	    sample_bytes == 4 && fp->fmt_bits == 32 &&
++	    iface->num_altsetting >= 3 &&
++	    fp->altsetting == iface->num_altsetting - 1)
++		return SNDRV_PCM_FMTBIT_DSD_U32_BE;
++	return 0;
++}
+ 
+ /*
+  * handle the quirks for the contained interfaces
+@@ -1887,12 +1935,16 @@
+ }
+ 
+ int snd_usb_select_mode_quirk(struct snd_usb_audio *chip,
+-			      const struct audioformat *fmt)
++			      const struct audioformat *fmt,
++			      snd_pcm_format_t selected_format,
++			      unsigned int selected_rate)
+ {
+ 	struct usb_device *dev = chip->dev;
+ 	int err;
+-
+-	if (chip->quirk_flags & QUIRK_FLAG_ITF_USB_DSD_DAC) {
++	u16 mode_iface = is_fostex_dsd(chip) ? fmt->iface : 1;
++
++	if ((chip->quirk_flags & QUIRK_FLAG_ITF_USB_DSD_DAC) ||
++	    is_fostex_dsd(chip)) {
+ 		/* First switch to alt set 0, otherwise the mode switch cmd
+ 		 * will not be accepted by the DAC
+ 		 */
+@@ -1903,11 +1955,14 @@
+ 		msleep(20); /* Delay needed after setting the interface */
+ 
+ 		/* Vendor mode switch cmd is required. */
+-		if (fmt->formats & SNDRV_PCM_FMTBIT_DSD_U32_BE) {
++		/* Fostex shares the 32-bit alternate with PCM/DoP. */
++		if (is_fostex_dsd(chip) ?
++		    selected_format == SNDRV_PCM_FORMAT_DSD_U32_BE :
++		    !!(fmt->formats & SNDRV_PCM_FMTBIT_DSD_U32_BE)) {
+ 			/* DSD mode (DSD_U32) requested */
+ 			err = snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0), 0,
+ 					      USB_DIR_OUT|USB_TYPE_VENDOR|USB_RECIP_INTERFACE,
+-					      1, 1, NULL, 0);
++					      1, mode_iface, NULL, 0);
+ 			if (err < 0)
+ 				return err;
+ 
+@@ -1916,12 +1971,36 @@
+ 			/* PCM mode (S16) requested */
+ 			err = snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0), 0,
+ 					      USB_DIR_OUT|USB_TYPE_VENDOR|USB_RECIP_INTERFACE,
+-					      0, 1, NULL, 0);
++					      0, mode_iface, NULL, 0);
+ 			if (err < 0)
+ 				return err;
+ 
+ 		}
+ 		msleep(20);
++
++		if (is_fostex_dsd(chip)) {
++			int clock;
++
++			/* Probe initializes rate_max (352800) before native mode.
++			 * Changing the mode flag does not reapply that clock in
++			 * the device. Windows reissues SET_CUR after mode changes;
++			 * do the same even when GET_CUR or clock_ref is unchanged.
++			 */
++			clock = snd_usb_clock_find_source(chip, fmt, false);
++			if (clock < 0)
++				return clock;
++			err = snd_usb_fostex_set_rate(chip, fmt, clock,
++						     selected_rate);
++			if (err < 0)
++				return err;
++			/* A missing/read-only clock or mismatched readback must
++			 * not report a successfully prepared native stream.
++			 */
++			if ((unsigned int)err != selected_rate)
++				return -EIO;
++			return 1; /* Strict mode/rate/validity transaction completed. */
++
++		}
+ 	}
+ 	return 0;
+ }
+@@ -1985,6 +2064,9 @@
+ 					unsigned int sample_bytes)
+ {
+ 	struct usb_interface *iface;
++
++	if (is_fostex_dsd(chip))
++		return fostex_dsd_format_quirk(chip, fp, sample_bytes);
+ 
+ 	/* Playback Designs */
+ 	if (USB_ID_VENDOR(chip->usb_id) == 0x23ba &&
+--- a/sound/usb/quirks.h
++++ b/sound/usb/quirks.h
+@@ -1,6 +1,13 @@
++/*
++ * Fostex HP-A4BL native DSD modifications: 2026-10-02.
++ * Local driver changes; see docs/PROVENANCE.md.
++ * This publication adds this notice only; executable logic is unchanged.
++ */
+ /* SPDX-License-Identifier: GPL-2.0 */
+ #ifndef __USBAUDIO_QUIRKS_H
+ #define __USBAUDIO_QUIRKS_H
++
++#include <sound/pcm.h>
+ 
+ struct audioformat;
+ struct snd_usb_endpoint;
+@@ -37,8 +44,14 @@
+ 			   __u8 request, __u8 requesttype, __u16 value,
+ 			   __u16 index, void *data, __u16 size);
+ 
++/* True only for explicitly enabled native DSD on HP-A4BL 1019:0013. */
++bool snd_usb_fostex_dsd_enabled(struct snd_usb_audio *chip);
++
++/* Returns 1 when the Fostex quirk fully initialized the clock, 0 otherwise. */
+ int snd_usb_select_mode_quirk(struct snd_usb_audio *chip,
+-			      const struct audioformat *fmt);
++			      const struct audioformat *fmt,
++			      snd_pcm_format_t selected_format,
++			      unsigned int selected_rate);
+ 
+ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
+ 					struct audioformat *fp,
+--- a/sound/usb/stream.c
++++ b/sound/usb/stream.c
+@@ -1,4 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Fostex HP-A4BL native DSD modifications: 2026-10-02.
++ * Local driver changes; see docs/PROVENANCE.md.
++ * This publication adds this notice only; executable logic is unchanged.
++ */
+ /*
+  */
+ 
+@@ -1248,6 +1253,9 @@
+ 			set_iface_first = true;
+ 
+ 		/* try to set the interface... */
++		if (snd_usb_fostex_dsd_enabled(chip))
++			continue;
++
+ 		usb_set_interface(chip->dev, iface_no, 0);
+ 		if (set_iface_first)
+ 			usb_set_interface(chip->dev, iface_no, altno);

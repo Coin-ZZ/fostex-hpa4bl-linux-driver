@@ -1,0 +1,26 @@
+# Kernel build products
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.d
+Module.symvers
+modules.order
+.tmp_versions/
+# Local tools and test output
+__pycache__/
+*.py[cod]
+*.log
+# Do not commit private captures, audio, signing material or vendor packages
+*.pcap
+*.pcapng
+*.raw
+*.dsf
+*.dff
+*.key
+*.pem
+*.p12
+*.pfx
+*.der
+*.zip

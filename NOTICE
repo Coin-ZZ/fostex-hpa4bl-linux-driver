@@ -1,0 +1,47 @@
+License scope and attribution
+=============================
+
+This is an unofficial, modified Linux USB-audio source distribution. It is
+not a Fostex, Linux, Ubuntu, or Debian endorsement or official driver release.
+
+Linux-derived material
+----------------------
+The kernel-source/ and kernel-source-debian-6.12/ trees, patches/, and all
+C source fixtures under tests/fixtures/ retain their upstream copyright
+notices and file-specific licensing. The combined Linux driver is distributed
+under GNU GPL version 2. LICENSE contains the complete GPLv2 text.
+
+Individual files with GPL-2.0-or-later or GPL-2.0+ notices retain that grant;
+this notice does not narrow it. Likewise, existing alternative licensing,
+including the complete dual-license notice in sound/usb/midi.c, is retained.
+The kernel syscall exception concerns normal use of the kernel through system
+calls; it does not turn the kernel driver or its patches into MIT code.
+
+COPYING-kernel and kernel-source-debian-6.12/COPYING are unchanged upstream
+notices. Their LICENSES paths refer to this repository's top-level
+LICENSES/preferred/GPL-2.0 and LICENSES/exceptions/Linux-syscall-note.
+Their documentation reference is available at:
+https://docs.kernel.org/process/license-rules.html
+
+Original tools
+--------------
+LICENSE-tools applies to the original Python tools c55_boot.py,
+check_headers.py, fostex_probe.py, the original Python tests tests/test_*.py,
+and build.sh. Its reference to "tests" does not include tests/fixtures/ or
+Linux source code extracted by the tests. No MIT relicensing of Linux code
+is intended. Preserve LICENSE-tools with copies of those original tools.
+
+Repository documentation is provided under GPLv2, except quoted or included
+third-party license notices, which retain their own terms.
+
+Modifications and provenance
+----------------------------
+Local Fostex adaptations are not upstream Linux or distributor changes.
+Dated modification notices in the affected C/header files identify the local
+adaptations. Source origin and local changes are
+described in docs/PROVENANCE.md.
+Preserve the notices and corresponding license texts when redistributing.
+
+No vendor firmware, Windows driver binaries, music, capture payloads, private
+signing keys, or user diagnostic archives are included. Product names identify
+compatibility and remain the property of their respective owners.
